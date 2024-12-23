@@ -4,14 +4,18 @@
 //! as expressed by the `webpki-roots` crate.
 //!
 //! This is, obviously, quite a heuristic test.
+mod common;
+
 use std::collections::HashMap;
 
+use pki_types::Der;
 use ring::io::der;
-use webpki::TrustAnchor;
+use serial_test::serial;
+use webpki::anchor_from_trusted_cert;
 
-fn stringify_x500name(subject: &[u8]) -> String {
+fn stringify_x500name(subject: &Der<'_>) -> String {
     let mut parts = vec![];
-    let mut reader = untrusted::Reader::new(subject.into());
+    let mut reader = untrusted::Reader::new(subject.as_ref().into());
 
     while !reader.at_end() {
         let (tag, contents) = der::read_tag_and_get_value(&mut reader).unwrap();
@@ -54,22 +58,22 @@ fn stringify_x500name(subject: &[u8]) -> String {
 
 #[test]
 fn test_does_not_have_many_roots_unknown_by_mozilla() {
-    let native = rustls_native_certs::load_native_certs().unwrap();
+    let native = rustls_native_certs::load_native_certs();
     let mozilla = webpki_roots::TLS_SERVER_ROOTS
         .iter()
-        .map(|ta| (ta.spki, ta))
+        .map(|ta| (ta.subject_public_key_info.as_ref(), ta))
         .collect::<HashMap<_, _>>();
 
     let mut missing_in_moz_roots = 0;
 
-    for cert in &native {
-        let cert = TrustAnchor::try_from_cert_der(&cert.0).unwrap();
-        if let Some(moz) = mozilla.get(cert.spki) {
+    for cert in &native.certs {
+        let cert = anchor_from_trusted_cert(cert).unwrap();
+        if let Some(moz) = mozilla.get(cert.subject_public_key_info.as_ref()) {
             assert_eq!(cert.subject, moz.subject, "subjects differ for public key");
         } else {
             println!(
                 "Native anchor {:?} is missing from mozilla set",
-                stringify_x500name(cert.subject)
+                stringify_x500name(&cert.subject)
             );
             missing_in_moz_roots += 1;
         }
@@ -84,7 +88,7 @@ fn test_does_not_have_many_roots_unknown_by_mozilla() {
 
     let diff = (missing_in_moz_roots as f64) / (mozilla.len() as f64);
     println!("mozilla: {:?}", mozilla.len());
-    println!("native: {:?}", native.len());
+    println!("native: {:?}", native.certs.len());
     println!(
         "{:?} anchors present in native set but not mozilla ({}%)",
         missing_in_moz_roots,
@@ -95,21 +99,22 @@ fn test_does_not_have_many_roots_unknown_by_mozilla() {
 
 #[test]
 fn test_contains_most_roots_known_by_mozilla() {
-    let native = rustls_native_certs::load_native_certs().unwrap();
+    let native = rustls_native_certs::load_native_certs();
 
     let mut native_map = HashMap::new();
-    for anchor in &native {
-        let cert = TrustAnchor::try_from_cert_der(&anchor.0).unwrap();
-        native_map.insert(cert.spki.to_vec(), anchor);
+    for anchor in &native.certs {
+        let cert = anchor_from_trusted_cert(anchor).unwrap();
+        let spki = cert.subject_public_key_info.as_ref();
+        native_map.insert(spki.to_owned(), anchor);
     }
 
     let mut missing_in_native_roots = 0;
     let mozilla = webpki_roots::TLS_SERVER_ROOTS;
     for cert in mozilla {
-        if native_map.get(cert.spki).is_none() {
+        if !native_map.contains_key(cert.subject_public_key_info.as_ref()) {
             println!(
                 "Mozilla anchor {:?} is missing from native set",
-                stringify_x500name(cert.subject)
+                stringify_x500name(&cert.subject)
             );
             missing_in_native_roots += 1;
         }
@@ -124,7 +129,7 @@ fn test_contains_most_roots_known_by_mozilla() {
 
     let diff = (missing_in_native_roots as f64) / (mozilla.len() as f64);
     println!("mozilla: {:?}", mozilla.len());
-    println!("native: {:?}", native.len());
+    println!("native: {:?}", native.certs.len());
     println!(
         "{:?} anchors present in mozilla set but not native ({}%)",
         missing_in_native_roots,
@@ -134,11 +139,16 @@ fn test_contains_most_roots_known_by_mozilla() {
 }
 
 #[test]
+#[serial]
 fn util_list_certs() {
-    let native = rustls_native_certs::load_native_certs().unwrap();
+    unsafe {
+        // SAFETY: safe because of #[serial]
+        common::clear_env();
+    }
 
-    for (i, cert) in native.iter().enumerate() {
-        let cert = TrustAnchor::try_from_cert_der(&cert.0).unwrap();
-        println!("cert[{}] = {}", i, stringify_x500name(cert.subject));
+    let native = rustls_native_certs::load_native_certs();
+    for (i, cert) in native.certs.iter().enumerate() {
+        let cert = anchor_from_trusted_cert(cert).unwrap();
+        println!("cert[{i}] = {}", stringify_x500name(&cert.subject));
     }
 }
