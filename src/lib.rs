@@ -119,12 +119,13 @@ use macos as platform;
 /// [c_rehash]: https://www.openssl.org/docs/manmaster/man1/c_rehash.html
 pub fn load_native_certs() -> CertificateResult {
     #[cfg(target_os = "wasi")]
-    return load_certs_from_env().unwrap_or_else(|| {
-        Err(Error::new(
-            ErrorKind::Other,
-            "wasi does not support SSL_CERT_FILE",
-        ))
-    });
+    match CertPaths::from_env().load() {
+        out if !out.certs.is_empty() => out,
+        _ => CertificateResult {
+            certs: vec![],
+            errors: vec![Error { context: "loading native certs", kind: ErrorKind::Os(Box::new(io::Error::new(io::ErrorKind::NotFound, "loading native certs"))) }],
+        }
+    }
     #[cfg(not(target_os = "wasi"))]
     match CertPaths::from_env().load() {
         out if !out.certs.is_empty() => out,
